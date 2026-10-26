@@ -4,6 +4,12 @@ All notable changes to `pepper` (distribution `vycari-pepper`). Newest first. Th
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) (while 0.x, a minor bump may change flags or output).
 
+## Unreleased
+
+- `pepper comments list|create --note N`: comments on a room note, optionally on a quoted passage;
+  `--reply-to`, `--mention`, `--idempotency-key`, `--json`. Prototype against the new
+  `/api/v1/artifacts/{id}/comments` routes.
+
 ## 0.6.0 — 2026-10-26
 
 The CLI now declares how it renders replies, and the terminal UI follows the person event stream so
