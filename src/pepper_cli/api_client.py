@@ -1600,6 +1600,7 @@ class NoteComment:
     anchor: dict[str, Any] | None = None
     resolved_at: str | None = None
     resolved_by: str | None = None
+    deleted: bool = False
 
 
 @dataclass(frozen=True)
@@ -1636,6 +1637,7 @@ def _note_comment_from_dict(row: dict[str, Any]) -> NoteComment:
         anchor=anchor if isinstance(anchor, dict) else None,
         resolved_at=row.get("resolved_at"),
         resolved_by=str(resolver.get("display_name") or "") if isinstance(resolver, dict) else None,
+        deleted=row.get("deleted") is True,
     )
 
 
