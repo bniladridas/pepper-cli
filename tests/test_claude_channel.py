@@ -1276,6 +1276,30 @@ def test_a_pre_session_message_after_the_first_heartbeat_is_still_reported(monke
     assert result.kinds() == ["backlog"]
 
 
+def test_a_ping_before_the_head_cursor_does_not_end_the_catch_up(monkeypatch, tmp_path):
+    """A head start asks for the live edge and learns it from the cursor frame, not from a ping.
+
+    The replay can reach the client before the cursor boundary names it. A ping in that window
+    says the connection is healthy, not that the server has finished replaying, so it must not
+    clear ``first_run``: doing so makes the old unrecognised event behind it owe a ``resync``
+    the first-run window never owed.
+    """
+    cursor_file = tmp_path / "cursor"
+    old = _now() - timedelta(days=3)
+    fake = _Fake(
+        _CONNECTED
+        + _scope()
+        + _PING
+        + _event(4, kind="a.new.kind", created=old)
+        + _cursor(30)
+        + _PING
+    )
+
+    result = run_channel(monkeypatch, fake, ["--room", _ROOM, "--cursor-file", str(cursor_file)])
+
+    assert result.notifications == []
+
+
 # --- reconnects, gaps and the end (design §9.4) ------------------------------
 
 

@@ -831,7 +831,11 @@ class ChannelWorker:
         if frame.kind == "error":
             return self._frame_problem(frame)
         if frame.kind == "comment":
-            if frame.payload.get("comment") != "connected":
+            # A ping is not the cursor boundary: while the head is unknown the server may still
+            # replay its window, so ending the catch-up here would clear ``first_run`` before any
+            # replay was aged against it, and old events after the ping would owe a spurious
+            # ``resync``. The cursor frame (or the first event) is the boundary.
+            if frame.payload.get("comment") != "connected" and not self.head_pending:
                 self._caught_up()
             return None
         scoped = self.config.room is not None
