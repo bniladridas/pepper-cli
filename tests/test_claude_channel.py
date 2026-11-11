@@ -888,21 +888,30 @@ def test_a_resync_names_its_cause_gives_room_ids_and_is_safe_on_a_first_run(monk
     assert f"{_TOPIC} (room_id {_ROOM}; Kitchen › Dinner)" in note["content"]
 
 
-def test_an_old_event_replayed_after_a_first_run_still_owes_a_resync(monkeypatch):
-    """A first run whose window holds no messages pushes no backlog, so nothing but the completed
-    catch-up can clear ``first_run``. The stream then drops, and the reconnect replays an older
-    unrecognised event, which was missed and owes a resync. Left set, the flag takes it for
-    first-run history and drops it."""
+def test_an_old_event_replayed_after_a_first_run_replay_ends_still_owes_a_resync(monkeypatch):
+    """The window a first run replayed is gone, and the server says so. The ``gap`` names what
+    could not be replayed and ends the replay, so the old event after the floor is missed, not
+    history: left taking it for first-run history, the flag would drop it without a trace.
+
+    This pins the client contract only. It relies on the server sending ``history_expired`` when
+    the cursor asked for falls outside retention, which is not verified here."""
     old = _now() - timedelta(days=3)
     fake = _Fake(
         _CONNECTED + _scope() + _PING,
-        503,
-        _CONNECTED + _scope() + _event(7, kind="group.renamed", created=old) + _PING,
+        _CONNECTED + _scope() + _error("history_expired", retry=True, since=0, floor=30),
+        _CONNECTED + _scope() + _event(31, kind="group.renamed", created=old) + _PING,
     )
 
     result = run_channel(monkeypatch, fake, ["--room", _ROOM, "--start", "beginning"])
 
-    assert result.kinds() == ["resync"]
+    gap, resync = result.notifications
+    assert gap["meta"] == {
+        "kind": "gap",
+        "room_id": _ROOM,
+        "since": "0",
+        "floor": "30",
+    }
+    assert resync["meta"]["kind"] == "resync"
 
 
 def test_a_first_run_replay_of_old_room_events_owes_no_resync(monkeypatch):
@@ -1142,6 +1151,42 @@ def test_nothing_is_saved_before_the_head_is_known(monkeypatch, tmp_path):
     run_channel(monkeypatch, fake, ["--room", _ROOM, "--cursor-file", str(cursor_file)])
 
     assert not cursor_file.exists()
+
+
+def test_a_first_run_replay_survives_a_disconnect_inside_the_retained_window(monkeypatch):
+    """``--start beginning`` asks for a replay from 0, and a dropped connection proves nothing
+    about it. Resuming inside the retained window, the remaining old events are still history:
+    ending the replay at the disconnect would clear ``first_run`` and owe a spurious ``resync``."""
+    old = _now() - timedelta(days=3)
+    fake = _Fake(
+        _CONNECTED + _scope() + _PING,
+        503,
+        _CONNECTED + _scope() + _event(4, kind="group.renamed", created=old) + _cursor(30) + _PING,
+    )
+
+    result = run_channel(monkeypatch, fake, ["--room", _ROOM, "--start", "beginning"])
+
+    assert result.notifications == []
+    # The reconnect resumes from where it was, not from the head.
+    assert fake.stream_requests()[1].headers["last-event-id"] == "0"
+
+
+def test_the_cursor_frame_ends_a_first_run_replay_so_a_later_old_event_owes_a_resync(monkeypatch):
+    """The cursor frame is the replay boundary, not the last event. Past it, an old unrecognised
+    event was not part of the replay and owes the ``resync`` that first-run history would hide."""
+    old = _now() - timedelta(days=3)
+    fake = _Fake(
+        _CONNECTED
+        + _scope()
+        + _PING
+        + _cursor(30)
+        + _event(31, kind="group.renamed", created=old)
+        + _PING
+    )
+
+    result = run_channel(monkeypatch, fake, ["--room", _ROOM, "--start", "beginning"])
+
+    assert result.kinds() == ["resync"]
 
 
 def test_the_unscoped_channel_also_starts_at_the_head(monkeypatch):

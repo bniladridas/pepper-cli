@@ -427,6 +427,11 @@ class ChannelWorker:
         # ``resumed``: the cursor file held a position. A saved head of 0 is a resume, not a
         # first run, or the messages posted while the channel was down would be summarised away.
         self.first_run = not resumed and stored is None and cursor == 0
+        # ``--start beginning`` on a first run asks the server to replay from 0 and has no head to
+        # wait for, so ``head_pending`` is false throughout. Replay still has to outlast a ping and
+        # a disconnect: only the cursor frame, or a ``history_expired`` that names the floor, says
+        # the replay is over. A ping is liveness, and a dropped connection proves nothing.
+        self.replay_pending = self.first_run and not at_head
         self.cutoff = config.started_at - BACKLOG_SLACK
         self.self_id = config.self_id
         self.bound: api_client.WatchScope | None = None
@@ -551,7 +556,15 @@ class ChannelWorker:
         # The catch-up is over whether or not anything was skipped. Left set when nothing was,
         # ``first_run`` would go on suppressing resyncs for the rest of the process.
         self.first_run = False
+        self.replay_pending = False
         self._persist()
+
+    def _end_replay(self) -> None:
+        """End a first-run replay: flush what it held, and stop treating later events as history."""
+        if not self.replay_pending:
+            return
+        self.replay_pending = False
+        self._caught_up()
 
     def _resync(self, cause: str) -> None:
         """Owe a ``resync`` notice, remembering ``cause`` so the notice can name it."""
@@ -730,6 +743,11 @@ class ChannelWorker:
             # A position is known now: the reconnect resumes from the floor, not the head.
             self.head_pending = False
             self._advance(floor)
+        # The window the replay would have covered is gone, so it is over: whatever the floor now
+        # skips is named by the ``gap`` pushed above, and nothing after it is first-run history.
+        # This relies on the server sending ``history_expired`` when the cursor asked for falls
+        # outside retention; that server behaviour is not verified here.
+        self._end_replay()
 
     def _frame_problem(self, frame: api_client.FeedFrame) -> str | None:
         """The retryable problem an ``error`` frame reports; ``None`` when it was a gap that is
@@ -834,8 +852,14 @@ class ChannelWorker:
             # A ping is not the cursor boundary: while the head is unknown the server may still
             # replay its window, so ending the catch-up here would clear ``first_run`` before any
             # replay was aged against it, and old events after the ping would owe a spurious
-            # ``resync``. The cursor frame (or the first event) is the boundary.
-            if frame.payload.get("comment") != "connected" and not self.head_pending:
+            # ``resync``. The cursor frame is the boundary. The same holds on a ``--start
+            # beginning`` first run, where the head is the start and no such frame has named the
+            # end of the replay yet.
+            if (
+                frame.payload.get("comment") != "connected"
+                and not self.head_pending
+                and not self.replay_pending
+            ):
                 self._caught_up()
             return None
         scoped = self.config.room is not None
@@ -854,6 +878,12 @@ class ChannelWorker:
             self._handle_event(frame.kind, frame.payload)
         elif self.head_pending:
             self._live_edge()
+        if frame.kind == "cursor":
+            # The cursor frame is the explicit replay boundary: it names the position the replay
+            # reached, which is what ``_live_edge`` uses for a head start. An event is not a
+            # boundary even though it advances the cursor, or the first replayed event would end
+            # the replay early and the rest of the window would owe a spurious ``resync``.
+            self._end_replay()
         self.head_pending = False
         self._advance(new_cursor)
         return None
